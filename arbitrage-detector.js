@@ -135,7 +135,7 @@ async function checkArbitrage() {
 // 9. Execution Wrapper
 async function main() {
     // --- Startup Notification ---
-    const startupMsg = `🤖 **Arbitrage Bot Started!**\n**Status:** 🟢 Active\n**Pair:** WETH/USDC\n**DEXs:** Uniswap V3 | Camelot V3\n**Interval:** Every 5 minutes\n**Started At:** ${new Date().toISOString()}`;
+    const startupMsg = `🤖 **Arbitrage Bot Started!**\n**Status:** 🟢 Active\n**Pair:** WETH/USDC\n**DEXs:** Uniswap V3 | Camelot V3\n**Interval:** Every 35 minutes\n**Started At:** ${new Date().toISOString()}`;
     
     console.log("Sending startup notification to Discord...");
     await sendDiscordAlert(startupMsg);
@@ -144,7 +144,7 @@ async function main() {
     await checkArbitrage();
     
     // --- Loop ---
-    setInterval(checkArbitrage, 5 * 60 * 1000); // Run every 5 minutes
+    setInterval(checkArbitrage, 35 * 60 * 1000); // Run every 35 minutes
 }
 
 main().catch(console.error);
