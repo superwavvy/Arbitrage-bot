@@ -1,16 +1,25 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
 
-// --- 1. Setup Provider ---
-const ARBITRUM_RPC = process.env.ARBITRUM_RPC;
-if (!ARBITRUM_RPC) {
-    console.error("ERROR: Missing ARBITRUM_RPC in .env file.");
+// --- 1. Setup Provider (WSS) ---
+const ARBITRUM_WSS = process.env.ARBITRUM_WSS;
+if (!ARBITRUM_WSS) {
+    console.error("ERROR: Missing ARBITRUM_WSS in .env file.");
     process.exit(1);
 }
 
-const provider = new ethers.JsonRpcProvider(ARBITRUM_RPC, {
+const provider = new ethers.WebSocketProvider(ARBITRUM_WSS, {
     chainId: 42161,
     name: 'arbitrum'
+});
+
+// Handle WebSocket disconnects automatically
+provider.websocket.on('close', () => {
+    console.log("⚠️ WebSocket closed. Reconnecting...");
+    // Simple reconnect logic (PM2 will also restart if it crashes)
+});
+provider.websocket.on('error', (err) => {
+    console.error("WebSocket error:", err);
 });
 
 // --- 2. Token Addresses ---
@@ -26,7 +35,10 @@ const CAMELOT_V3_FACTORY = '0x1a3c9b1d2f0529d97f2afc5136cc23e58f1fd35b';
 // --- 4. ABIs ---
 const V3_FACTORY_ABI = ["function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"];
 const CAMELOT_FACTORY_ABI = ["function poolByPair(address tokenA, address tokenB) external view returns (address pool)"];
-const V3_POOL_ABI = ["function liquidity() external view returns (uint128)"];
+const V3_POOL_ABI = [
+    "function liquidity() external view returns (uint128)",
+    "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"
+];
 const UNI_V3_QUOTER_ABI = [
     "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
 ];
@@ -66,16 +78,15 @@ async function getRpcHealth() {
     }
 }
 
-// --- 8. Liquidity Checks (return null on failure, NOT 0n) ---
+// --- 8. Liquidity & Pricing Functions (Unchanged) ---
 async function getUniswapV3Liquidity(tokenA, tokenB, fee) {
     try {
         const poolAddress = await uniswapV3Factory.getPool(tokenA, tokenB, fee);
-        if (poolAddress === ethers.ZeroAddress) return null; // pool doesn't exist
+        if (poolAddress === ethers.ZeroAddress) return null;
         const poolContract = new ethers.Contract(poolAddress, V3_POOL_ABI, provider);
         return await poolContract.liquidity();
     } catch (e) {
-        console.log("⚠️ RPC Error (Uniswap liquidity):", e.message);
-        return null; // UNKNOWN — not "zero"
+        return null;
     }
 }
 
@@ -86,61 +97,42 @@ async function getCamelotV3Liquidity(tokenA, tokenB) {
         const poolContract = new ethers.Contract(poolAddress, V3_POOL_ABI, provider);
         return await poolContract.liquidity();
     } catch (e) {
-        console.log("⚠️ RPC Error (Camelot liquidity):", e.message);
-        return null; // UNKNOWN — not "zero"
+        return null;
     }
 }
 
-// --- 9. Price Quotes ---
 async function getUniV3Price(amountIn, fee) {
     try {
         const params = { tokenIn: WETH, tokenOut: USDC, amountIn, fee, sqrtPriceLimitX96: 0 };
         const result = await uniswapV3Quoter.quoteExactInputSingle.staticCall(params);
         return parseFloat(ethers.formatUnits(result[0], 6));
-    } catch (e) {
-        console.log("Uniswap V3 Quote Error:", e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 async function getCamelotV3Price(amountIn) {
     try {
         const result = await camelotV3Quoter.quoteExactInputSingle.staticCall(WETH, USDC, amountIn, 0);
         return parseFloat(ethers.formatUnits(result[0], 6));
-    } catch (e) {
-        console.log("Camelot V3 Quote Error:", e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-// --- 10. Price Impact Estimator ---
-// Compares a small trade vs a large trade to estimate slippage
 async function estimatePriceImpact() {
-    const smallAmount = ethers.parseEther("0.1"); // 0.1 WETH — baseline
-    const largeAmount = ethers.parseEther("2.0"); // 2 WETH — realistic trade size
-
+    const smallAmount = ethers.parseEther("0.1");
+    const largeAmount = ethers.parseEther("2.0");
     const smallPrice = await getUniV3Price(smallAmount, 500);
     const largePrice = await getUniV3Price(largeAmount, 500);
-
     if (smallPrice === null || largePrice === null) return null;
     if (smallPrice <= 0 || largePrice <= 0) return null;
-
     const impact = ((smallPrice - largePrice) / smallPrice) * 100;
     const absImpact = Math.abs(impact);
-
-    // Sanity check: if impact is > 100%, the quote is unreliable
-    // (likely hit the edge of concentrated liquidity)
-    if (absImpact > 100) {
-        return { smallPrice, largePrice, impact: null, unreliable: true };
-    }
-
+    if (absImpact > 100) return { smallPrice, largePrice, impact: null, unreliable: true };
     return { smallPrice, largePrice, impact: absImpact, unreliable: false };
 }
 
-// --- 11. Main Logic ---
-async function checkArbitrage() {
+// --- 9. Main Logic (Refactored for Event-Driven) ---
+async function checkArbitrage(triggerSource) {
     console.log(`\n=========================================`);
-    console.log(`[${new Date().toISOString()}] Checking Arbitrum Prices & Liquidity...`);
+    console.log(`[${new Date().toISOString()}] ⚡ Triggered by: ${triggerSource}`);
 
     const amountIn = ethers.parseEther("1.0");
     const rpcHealth = await getRpcHealth();
@@ -148,36 +140,26 @@ async function checkArbitrage() {
     const uniV3Liq = await getUniswapV3Liquidity(WETH, USDC, 500);
     const camelotV3Liq = await getCamelotV3Liquidity(WETH, USDC);
 
-    // --- Handle UNKNOWN states explicitly ---
     const uniStatus = uniV3Liq === null ? "UNKNOWN" : `${uniV3Liq.toString()} units`;
     const camelotStatus = camelotV3Liq === null ? "UNKNOWN" : `${camelotV3Liq.toString()} units`;
 
     console.log(`RPC: ${rpcHealth.status} (${rpcHealth.latency})`);
-    console.log(`Uniswap V3 Liquidity: ${uniStatus}`);
-    console.log(`Camelot V3 Liquidity: ${camelotStatus}`);
 
     let uniV3Price = null;
     let camelotV3Price = null;
 
     if (uniV3Liq !== null && uniV3Liq > 0n) {
         uniV3Price = await getUniV3Price(amountIn, 500);
-        if (uniV3Price) console.log(`Uniswap V3: 1 WETH = ${uniV3Price.toFixed(2)} USDC`);
-    } else {
-        console.log(`⚠️ Uniswap V3: UNKNOWN (liquidity check failed or pool empty)`);
     }
-
     if (camelotV3Liq !== null && camelotV3Liq > 0n) {
         camelotV3Price = await getCamelotV3Price(amountIn);
-        if (camelotV3Price) console.log(`Camelot V3: 1 WETH = ${camelotV3Price.toFixed(2)} USDC`);
-    } else {
-        console.log(`⚠️ Camelot V3: UNKNOWN (liquidity check failed or pool empty)`);
     }
 
-    // --- Compare & Alert ---
     if (uniV3Price !== null && camelotV3Price !== null) {
         const priceDifference = Math.abs(uniV3Price - camelotV3Price);
         const percentageDiff = (priceDifference / Math.min(uniV3Price, camelotV3Price)) * 100;
 
+        console.log(`Uniswap: $${uniV3Price.toFixed(2)} | Camelot: $${camelotV3Price.toFixed(2)}`);
         console.log(`Spread: ${priceDifference.toFixed(2)} USDC (${percentageDiff.toFixed(4)}%)`);
 
         if (percentageDiff > 0.3) {
@@ -185,53 +167,90 @@ async function checkArbitrage() {
 
             const buyDex = uniV3Price > camelotV3Price ? 'Camelot V3' : 'Uniswap V3';
             const sellDex = uniV3Price > camelotV3Price ? 'Uniswap V3' : 'Camelot V3';
-
-            // Get price impact estimate
             const impact = await estimatePriceImpact();
-const impactStr = impact === null
-    ? "UNKNOWN (quote failed)"
-    : impact.unreliable
-    ? "UNKNOWN (quote hit liquidity limit — trade too large for this pool)"
-    : `~${impact.impact.toFixed(3)}% on 2 WETH`;
-            // Build the enhanced health-record alert
+            
+            const impactStr = impact === null ? "UNKNOWN (quote failed)"
+                : impact.unreliable ? "UNKNOWN (liquidity limit)"
+                : `~${impact.impact.toFixed(3)}% on 2 WETH`;
+
             const alertMsg =
-                `🚀 **Arbitrage Opportunity Detected!**\n` +
+                `🚀 **Arb Detected!** (Trigger: ${triggerSource})\n` +
                 `**Pair:** WETH/USDC\n` +
                 `**Spread:** ${percentageDiff.toFixed(4)}%\n` +
                 `**Action:** Buy on **${buyDex}** → Sell on **${sellDex}**\n\n` +
-                `**📋 Execution Health Record:**\n` +
-                `• **Quote Size:** 1 WETH\n` +
-                `• **UniV3 Price:** $${uniV3Price.toFixed(2)}\n` +
-                `• **Camelot Price:** $${camelotV3Price.toFixed(2)}\n` +
-                `• **Estimated Price Impact:** ${impactStr}\n` +
-                `• **Pool Liquidity (UniV3):** ${uniStatus}\n` +
-                `• **Pool Liquidity (Camelot):** ${camelotStatus}\n\n` +
-                `**🌐 Network & Timestamp:**\n` +
+                `**📋 Health Record:**\n` +
+                `• **UniV3:** $${uniV3Price.toFixed(2)} (Liq: ${uniStatus})\n` +
+                `• **Camelot:** $${camelotV3Price.toFixed(2)} (Liq: ${camelotStatus})\n` +
+                `• **Impact:** ${impactStr}\n` +
                 `• **RPC:** ${rpcHealth.status} (${rpcHealth.latency})\n` +
-                `• **Chain ID:** 42161 (Arbitrum One)\n` +
-                `• **Timestamp:** ${new Date().toISOString()}`;
+                `• **Time:** ${new Date().toISOString()}`;
 
             await sendDiscordAlert(alertMsg);
         } else {
-            console.log("No significant arbitrage opportunity right now.");
+            console.log("No significant opportunity.");
         }
     } else {
         console.log("❌ Could not compare: one or both venues returned UNKNOWN.");
     }
 }
 
-// --- 12. Execution ---
+// --- 10. WebSocket Event Listeners & Debounce ---
+let isChecking = false;
+let pendingCheck = false;
+
+async function handleSwapEvent(dexName, poolAddress) {
+    if (isChecking) {
+        pendingCheck = true;
+        return;
+    }
+    
+    isChecking = true;
+    try {
+        await checkArbitrage(`Swap on ${dexName} (${poolAddress.slice(0, 6)}...)`);
+    } finally {
+        isChecking = false;
+        if (pendingCheck) {
+            pendingCheck = false;
+            setTimeout(() => handleSwapEvent(dexName, poolAddress), 500); // 500ms cooldown
+        }
+    }
+}
+
+async function startListeners() {
+    console.log("Fetching pool addresses...");
+    const uniPoolAddr = await uniswapV3Factory.getPool(WETH, USDC, 500);
+    const camelotPoolAddr = await camelotV3Factory.poolByPair(WETH, USDC);
+
+    if (uniPoolAddr === ethers.ZeroAddress) throw new Error("Uniswap pool not found");
+    if (camelotPoolAddr === ethers.ZeroAddress) throw new Error("Camelot pool not found");
+
+    const uniPool = new ethers.Contract(uniPoolAddr, V3_POOL_ABI, provider);
+    const camelotPool = new ethers.Contract(camelotPoolAddr, V3_POOL_ABI, provider);
+
+    console.log(`✅ Listening for Swaps on Uniswap V3: ${uniPoolAddr}`);
+    console.log(`✅ Listening for Swaps on Camelot V3: ${camelotPoolAddr}`);
+
+    // Attach listeners
+    uniPool.on("Swap", () => handleSwapEvent("Uniswap", uniPoolAddr));
+    camelotPool.on("Swap", () => handleSwapEvent("Camelot", camelotPoolAddr));
+
+    // Run one initial check on boot
+    await checkArbitrage("Startup Check");
+}
+
+// --- 11. Execution ---
 async function main() {
     const startupMsg =
-        `🤖 **Arbitrage Bot Started!**\n` +
-        `**Pair:** WETH/USDC\n` +
-        `**DEXs:** Uniswap V3 | Camelot V3\n` +
-        `**Interval:** Every 35 minutes\n` +
+        `🤖 **Arbitrage Bot v2 (WSS) Started!**\n` +
+        `**Mode:** Event-Driven (Real-time)\n` +
+        `**Trigger:** On-chain Swap events\n` +
         `**Started:** ${new Date().toISOString()}`;
     await sendDiscordAlert(startupMsg);
 
-    await checkArbitrage();
-    setInterval(checkArbitrage, 35 * 60 * 1000);
+    await startListeners();
 }
 
-main().catch(console.error);
+main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+});
