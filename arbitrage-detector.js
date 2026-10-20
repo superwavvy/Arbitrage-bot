@@ -18,6 +18,24 @@ provider.websocket.on('close', () => {
     console.log("⚠️ WebSocket closed. Reconnecting...");
     // Simple reconnect logic (PM2 will also restart if it crashes)
 });
+
+provider.websocket.on('close', () => {
+    console.log("⚠️ WebSocket closed. Attempting to reconnect in 5 seconds...");
+    setTimeout(() => {
+        console.log("🔄 Reconnecting...");
+        process.exit(1); // PM2/Botkeep will instantly restart the script
+    }, 5000);
+});
+
+
+provider.websocket.on('close', () => {
+    console.log("⚠️ WebSocket closed. Attempting to reconnect in 5 seconds...");
+    setTimeout(() => {
+        console.log("🔄 Reconnecting...");
+        process.exit(1); // PM2/Botkeep will instantly restart the script
+    }, 5000);
+});
+
 provider.websocket.on('error', (err) => {
     console.error("WebSocket error:", err);
 });
@@ -162,7 +180,7 @@ async function checkArbitrage(triggerSource) {
         console.log(`Uniswap: $${uniV3Price.toFixed(2)} | Camelot: $${camelotV3Price.toFixed(2)}`);
         console.log(`Spread: ${priceDifference.toFixed(2)} USDC (${percentageDiff.toFixed(4)}%)`);
 
-        if (percentageDiff > 0.3) {
+        if (percentageDiff > 0.19) {
             console.log("🚀 REAL ARBITRAGE OPPORTUNITY DETECTED!");
 
             const buyDex = uniV3Price > camelotV3Price ? 'Camelot V3' : 'Uniswap V3';
