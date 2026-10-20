@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
+let activeOpportunity = null;
 
 // --- 1. Setup Provider (WSS) ---
 const ARBITRUM_WSS = process.env.ARBITRUM_WSS;
@@ -180,7 +181,19 @@ async function checkArbitrage(triggerSource) {
         console.log(`Uniswap: $${uniV3Price.toFixed(2)} | Camelot: $${camelotV3Price.toFixed(2)}`);
         console.log(`Spread: ${priceDifference.toFixed(2)} USDC (${percentageDiff.toFixed(4)}%)`);
 
+        const currentBlock = await provider.getBlockNumber();
+
         if (percentageDiff > 0.19) {
+            if (!activeOpportunity) {
+                activeOpportunity = {
+                    startTime: Date.now(),
+                    startBlock: currentBlock,
+                    startSpread: percentageDiff
+                };
+                console.log(`🚀 [OPPORTUNITY OPEN] Block: ${currentBlock} | Spread: ${percentageDiff.toFixed(4)}%`);
+            } else {
+                console.log(`📈 [OPPORTUNITY CONTINUES] Block: ${currentBlock} | Spread: ${percentageDiff.toFixed(4)}% (Age: ${Date.now() - activeOpportunity.startTime}ms)`);
+            }
             console.log("🚀 REAL ARBITRAGE OPPORTUNITY DETECTED!");
 
             const buyDex = uniV3Price > camelotV3Price ? 'Camelot V3' : 'Uniswap V3';
@@ -205,7 +218,14 @@ async function checkArbitrage(triggerSource) {
 
             await sendDiscordAlert(alertMsg);
         } else {
-            console.log("No significant opportunity.");
+            if (activeOpportunity) {
+                const duration = Date.now() - activeOpportunity.startTime;
+                const blocks = currentBlock - activeOpportunity.startBlock;
+                console.log(`📉 [OPPORTUNITY CLOSED] Lasted ${duration}ms (~${blocks} blocks) | Spread dropped to ${percentageDiff.toFixed(4)}%`);
+                activeOpportunity = null;
+            } else {
+                console.log("No significant opportunity.");
+            }
         }
     } else {
         console.log("❌ Could not compare: one or both venues returned UNKNOWN.");
