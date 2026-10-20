@@ -265,9 +265,6 @@ async function checkArbitrage(triggerSource) {
                 sendDiscordAlert(alertMsg),
                 executeTrade()
             ]);
-            
-            // Skip the old alert sending below
-            continue;
         } else {
             if (activeOpportunity) {
                 const duration = Date.now() - activeOpportunity.startTime;
