@@ -22,11 +22,11 @@ A Node.js bot that scans Uniswap V3 and Camelot V3 on Arbitrum for WETH/USDC arb
    `npm install`
 3. Create a `.env` file:
    ```env
-   ARBITRUM_RPC=your_alchemy_rpc_url
+   ARBITRUM_WSS=your_alchemy_wss_url
    DISCORD_WEBHOOK_URL=your_discord_webhook_url
 ## Known Limitations
 
 - **Price Impact Estimation:** The bot estimates slippage by comparing a 0.1 WETH quote against a 2 WETH quote on Uniswap V3. If the larger trade hits the edge of concentrated liquidity (a limitation of V3's tick system), the impact is reported as `UNKNOWN` rather than a misleading number.
 - **Execution:** This bot only *detects* arbitrage opportunities. It does not execute trades.
-- **Latency:** Detection runs every 35 minutes. Real-time opportunities are captured by HFT bots in milliseconds, so this tool is a **monitoring** tool, not a competitive execution bot.
+- **Latency:** Event-driven listener on Uniswap V3 and Camelot V3 swap events.. Real-time opportunities are captured by HFT bots in milliseconds, so this tool is a **monitoring** tool, not a competitive execution bot.
 - **Fail-Safe by Design:** Network failures produce `UNKNOWN` states instead of false zeros, so the bot never reports a safe spread on a failed scan.

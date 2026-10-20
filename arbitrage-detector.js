@@ -1,5 +1,11 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
+
+const EXECUTOR_ADDRESS = "0x6B0698E135cF50A5f7c85091744e7328AFFFd46f";
+const EXECUTOR_ABI = [
+    "function executeArb(address tokenIn, address tokenOut, uint256 amount, uint8 dex1, uint8 dex2, uint24 fee1, uint24 fee2, int256 minPnl) external"
+];
+
 let activeOpportunity = null;
 
 // --- 1. Setup Provider (WSS) ---
@@ -183,7 +189,7 @@ async function checkArbitrage(triggerSource) {
 
         const currentBlock = await provider.getBlockNumber();
 
-        if (percentageDiff > 0.19) {
+        if (percentageDiff > 0.4) {
             if (!activeOpportunity) {
                 activeOpportunity = {
                     startTime: Date.now(),
@@ -216,7 +222,52 @@ async function checkArbitrage(triggerSource) {
                 `• **RPC:** ${rpcHealth.status} (${rpcHealth.latency})\n` +
                 `• **Time:** ${new Date().toISOString()}`;
 
-            await sendDiscordAlert(alertMsg);
+
+            // --- EXECUTION LOGIC (Simultaneous with Discord Alert) ---
+            console.log("🚀 REAL ARBITRAGE OPPORTUNITY DETECTED!");
+            
+            const executeTrade = async () => {
+                if (!process.env.PRIVATE_KEY) {
+                    console.log("⚠️ Execution skipped: Missing Private Key or Contract Address.");
+                    return;
+                }
+                try {
+                    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+                    const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
+                    
+                    const loanAmount = ethers.parseEther("1.0"); // 1 WETH
+                    const minPnl = ethers.parseEther("0.005");   // Require at least 0.005 WETH profit
+                    
+                    // If Uni price > Camelot price, we buy on Camelot (dex 2), sell on Uni (dex 1)
+                    const buyOnCamelot = uniV3Price > camelotV3Price;
+                    const dex1 = buyOnCamelot ? 2 : 1;
+                    const dex2 = buyOnCamelot ? 1 : 2;
+                    const fee1 = buyOnCamelot ? 0 : 500; 
+                    const fee2 = buyOnCamelot ? 500 : 0;
+                    
+                    console.log("Firing transaction to Arbitrum...");
+                    const tx = await executor.executeArb(
+                        "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH
+                        "0x912CE59144191C1204E64559FE8253a0e49E6548", // ARB
+                        loanAmount, dex1, dex2, fee1, fee2, minPnl,
+                        { gasLimit: 2000000 }
+                    );
+                    console.log("✅ Tx Sent! Hash:", tx.hash);
+                    await sendDiscordAlert(`✅ **Arb Executed!** Hash: ${tx.hash}`);
+                } catch (e) {
+                    console.log("❌ Execution failed:", e.reason || e.message);
+                    await sendDiscordAlert(`❌ **Arb Failed:** ${e.reason || e.message}`);
+                }
+            };
+
+            // Fire Discord Alert and Execution at the SAME TIME
+            await Promise.all([
+                sendDiscordAlert(alertMsg),
+                executeTrade()
+            ]);
+            
+            // Skip the old alert sending below
+            continue;
         } else {
             if (activeOpportunity) {
                 const duration = Date.now() - activeOpportunity.startTime;
