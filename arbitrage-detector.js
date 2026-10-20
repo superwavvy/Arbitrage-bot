@@ -255,8 +255,14 @@ async function checkArbitrage(triggerSource) {
                     console.log("✅ Tx Sent! Hash:", tx.hash);
                     await sendDiscordAlert(`✅ **Arb Executed!** Hash: ${tx.hash}`);
                 } catch (e) {
-                    console.log("❌ Execution failed:", e.reason || e.message);
-                    await sendDiscordAlert(`❌ **Arb Failed:** ${e.reason || e.message}`);
+                    // Extract a clean error message for Discord
+                    let errMsg = "Unknown Error";
+                    if (e.shortMessage) errMsg = e.shortMessage;
+                    else if (e.reason) errMsg = e.reason;
+                    else if (e.message) errMsg = e.message.slice(0, 200); // Truncate massive JSON dumps
+                    
+                    console.log("❌ Execution failed:", errMsg);
+                    await sendDiscordAlert(`❌ **Arb Failed:** ${errMsg}`);
                 }
             };
 
